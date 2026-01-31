@@ -48,7 +48,7 @@ This app uses TheSportsDB. The free tier works for testing.
    ```bash
    export SPORTSDB_API_KEY="YOUR_KEY_HERE"
    ```
-If you do not set this, the app will use the public test key `1` (rate limited).
+If you do not set this, the app will use the public test key `123` (rate limited).
 
 ### 5) Run the API server
 ```bash
@@ -174,5 +174,5 @@ Returns predictions for upcoming games in the selected league.
 
 ## Troubleshooting
 - **No upcoming events**: Some leagues may be out of season; try a different league.
-- **Rate limited**: Use a personal API key instead of the public test key.
+- **Rate limited**: Use a personal API key instead of the public test key `123`.
 - **Cannot import module**: Ensure your virtual environment is activated.

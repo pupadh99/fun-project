@@ -16,7 +16,7 @@ LEAGUES: Dict[str, Dict[str, str]] = {
     "NHL": {"id": "4380", "name": "National Hockey League"},
 }
 
-DEFAULT_API_KEY = "1"
+DEFAULT_API_KEY = "123"
 BASE_ELO = 1500.0
 K_FACTOR = 20.0
 CACHE_TTL_SECONDS = int(os.getenv("SPORTSDB_CACHE_TTL_SECONDS", "300"))
