@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
@@ -40,6 +40,24 @@ CACHE_TTL_SECONDS = int(os.getenv("SPORTSDB_CACHE_TTL_SECONDS", "300"))
 LOOKAHEAD_DAYS = int(os.getenv("SPORTSDB_LOOKAHEAD_DAYS", "10"))
 HOME_ADVANTAGE = float(os.getenv("SPORTSDB_HOME_ADVANTAGE", "60"))
 MAX_TEAM_LOOKUPS = int(os.getenv("SPORTSDB_TEAM_LOOKUPS", "12"))
+RECENT_GAMES = int(os.getenv("SPORTSDB_RECENT_GAMES", "5"))
+H2H_GAMES = int(os.getenv("SPORTSDB_H2H_GAMES", "5"))
+REST_DAYS_CAP = int(os.getenv("SPORTSDB_REST_CAP", "14"))
+MAX_FEATURE_ADJUSTMENT = float(os.getenv("SPORTSDB_MAX_ADJUSTMENT", "400"))
+
+WEIGHT_WIN_PCT = float(os.getenv("SPORTSDB_WEIGHT_WIN_PCT", "160"))
+WEIGHT_RECENT = float(os.getenv("SPORTSDB_WEIGHT_RECENT", "120"))
+WEIGHT_H2H = float(os.getenv("SPORTSDB_WEIGHT_H2H", "80"))
+WEIGHT_REST = float(os.getenv("SPORTSDB_WEIGHT_REST", "5"))
+POINT_DIFF_WEIGHT_MULTIPLIER = float(os.getenv("SPORTSDB_WEIGHT_POINT_DIFF", "1.0"))
+
+POINT_DIFF_WEIGHTS = {
+    "Basketball": 6.0 * POINT_DIFF_WEIGHT_MULTIPLIER,
+    "Baseball": 25.0 * POINT_DIFF_WEIGHT_MULTIPLIER,
+    "American Football": 10.0 * POINT_DIFF_WEIGHT_MULTIPLIER,
+    "Ice Hockey": 20.0 * POINT_DIFF_WEIGHT_MULTIPLIER,
+}
+DEFAULT_POINT_DIFF_WEIGHT = 8.0 * POINT_DIFF_WEIGHT_MULTIPLIER
 
 FINISHED_STATUSES = {
     "FT",
@@ -157,8 +175,9 @@ INDEX_HTML = """<!doctype html>
       <header>
         <h1>Sports Outcome Predictions</h1>
         <p>
-          Educational predictions for NFL, NBA, MLB, and NHL using a simple Elo
-          model and TheSportsDB data.
+          Educational predictions for NFL, NBA, MLB, and NHL using an Elo-based
+          model blended with recent form, record, head-to-head, point
+          differential, and rest days from TheSportsDB data.
         </p>
         <p class="muted">
           Not intended for gambling or wagering decisions.
@@ -282,6 +301,28 @@ class CacheEntry:
     payload: Dict[str, Any]
 
 
+@dataclass
+class CompletedEvent:
+    date: datetime
+    home_team: str
+    away_team: str
+    home_score: int
+    away_score: int
+
+
+@dataclass
+class TeamStats:
+    games: int = 0
+    wins: int = 0
+    losses: int = 0
+    ties: int = 0
+    points_for: int = 0
+    points_against: int = 0
+    last_game_date: Optional[datetime] = None
+    results: List[float] = field(default_factory=list)
+    point_diffs: List[int] = field(default_factory=list)
+
+
 class SportsDBClient:
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
@@ -377,6 +418,21 @@ def normalize_status(value: Any) -> str:
     return str(value).strip().upper()
 
 
+def is_completed_event(event: Dict[str, Any]) -> bool:
+    status = normalize_status(event.get("strStatus"))
+    home_score = parse_score(event.get("intHomeScore"))
+    away_score = parse_score(event.get("intAwayScore"))
+    if home_score is None or away_score is None:
+        return False
+    if status in FINISHED_STATUSES:
+        return True
+    if status in UPCOMING_STATUSES:
+        return False
+    if status:
+        return False
+    return True
+
+
 def is_upcoming_event(event: Dict[str, Any], now: datetime) -> bool:
     status = normalize_status(event.get("strStatus"))
     home_score = parse_score(event.get("intHomeScore"))
@@ -405,6 +461,170 @@ def upcoming_sort_key(event: Dict[str, Any]) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def clamp_value(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def point_diff_weight(sport: str) -> float:
+    return POINT_DIFF_WEIGHTS.get(sport, DEFAULT_POINT_DIFF_WEIGHT)
+
+
+def extract_completed_event(event: Dict[str, Any]) -> Optional[CompletedEvent]:
+    if not is_completed_event(event):
+        return None
+    home = event.get("strHomeTeam")
+    away = event.get("strAwayTeam")
+    if not home or not away:
+        return None
+    home_score = parse_score(event.get("intHomeScore"))
+    away_score = parse_score(event.get("intAwayScore"))
+    if home_score is None or away_score is None:
+        return None
+    event_dt = parse_event_datetime(event)
+    if event_dt is None:
+        event_dt = datetime.min.replace(tzinfo=timezone.utc)
+    elif event_dt.tzinfo is None:
+        event_dt = event_dt.replace(tzinfo=timezone.utc)
+    return CompletedEvent(
+        date=event_dt,
+        home_team=home,
+        away_team=away,
+        home_score=home_score,
+        away_score=away_score,
+    )
+
+
+def build_team_stats(events: List[CompletedEvent]) -> Dict[str, TeamStats]:
+    stats: Dict[str, TeamStats] = {}
+
+    def update_team(
+        team: str, scored: int, allowed: int, event_date: datetime
+    ) -> None:
+        team_stats = stats.setdefault(team, TeamStats())
+        team_stats.games += 1
+        team_stats.points_for += scored
+        team_stats.points_against += allowed
+        if scored > allowed:
+            team_stats.wins += 1
+            result = 1.0
+        elif scored < allowed:
+            team_stats.losses += 1
+            result = 0.0
+        else:
+            team_stats.ties += 1
+            result = 0.5
+        team_stats.results.append(result)
+        team_stats.point_diffs.append(scored - allowed)
+        if team_stats.last_game_date is None or event_date > team_stats.last_game_date:
+            team_stats.last_game_date = event_date
+
+    for event in sorted(events, key=lambda item: item.date):
+        update_team(event.home_team, event.home_score, event.away_score, event.date)
+        update_team(event.away_team, event.away_score, event.home_score, event.date)
+
+    return stats
+
+
+def build_matchup_history(
+    events: List[CompletedEvent],
+) -> Dict[Tuple[str, str], List[CompletedEvent]]:
+    history: Dict[Tuple[str, str], List[CompletedEvent]] = {}
+    for event in events:
+        key = tuple(sorted((event.home_team, event.away_team)))
+        history.setdefault(key, []).append(event)
+    for matchups in history.values():
+        matchups.sort(key=lambda item: item.date)
+    return history
+
+
+def compute_team_features(stats: Optional[TeamStats], now: datetime) -> Dict[str, Any]:
+    if not stats or stats.games == 0:
+        return {
+            "win_pct": 0.5,
+            "recent_win_pct": 0.5,
+            "avg_point_diff": 0.0,
+            "rest_days": None,
+        }
+
+    win_pct = (stats.wins + 0.5 * stats.ties) / stats.games
+    recent_results = stats.results[-RECENT_GAMES:]
+    if recent_results:
+        recent_win_pct = sum(recent_results) / len(recent_results)
+    else:
+        recent_win_pct = win_pct
+    avg_point_diff = (stats.points_for - stats.points_against) / stats.games
+    rest_days: Optional[int] = None
+    if stats.last_game_date:
+        rest_days = (now - stats.last_game_date).days
+        rest_days = max(0, min(rest_days, REST_DAYS_CAP))
+
+    return {
+        "win_pct": win_pct,
+        "recent_win_pct": recent_win_pct,
+        "avg_point_diff": avg_point_diff,
+        "rest_days": rest_days,
+    }
+
+
+def head_to_head_diff(
+    home_team: str,
+    away_team: str,
+    matchup_history: Dict[Tuple[str, str], List[CompletedEvent]],
+) -> float:
+    key = tuple(sorted((home_team, away_team)))
+    events = matchup_history.get(key, [])
+    if not events:
+        return 0.0
+    recent_events = events[-H2H_GAMES:]
+    home_wins = 0
+    away_wins = 0
+    ties = 0
+    for event in recent_events:
+        if event.home_score == event.away_score:
+            ties += 1
+            continue
+        winner = event.home_team if event.home_score > event.away_score else event.away_team
+        if winner == home_team:
+            home_wins += 1
+        elif winner == away_team:
+            away_wins += 1
+    total = home_wins + away_wins + ties
+    if total == 0:
+        return 0.0
+    home_pct = (home_wins + 0.5 * ties) / total
+    return (2 * home_pct) - 1
+
+
+def compute_feature_adjustment(
+    home_team: str,
+    away_team: str,
+    team_stats: Dict[str, TeamStats],
+    matchup_history: Dict[Tuple[str, str], List[CompletedEvent]],
+    now: datetime,
+    sport: str,
+) -> float:
+    home_features = compute_team_features(team_stats.get(home_team), now)
+    away_features = compute_team_features(team_stats.get(away_team), now)
+
+    win_pct_diff = home_features["win_pct"] - away_features["win_pct"]
+    recent_diff = home_features["recent_win_pct"] - away_features["recent_win_pct"]
+    point_diff_diff = home_features["avg_point_diff"] - away_features["avg_point_diff"]
+
+    rest_diff = 0.0
+    if home_features["rest_days"] is not None and away_features["rest_days"] is not None:
+        rest_diff = float(home_features["rest_days"] - away_features["rest_days"])
+
+    adjustment = (
+        win_pct_diff * WEIGHT_WIN_PCT
+        + recent_diff * WEIGHT_RECENT
+        + head_to_head_diff(home_team, away_team, matchup_history) * WEIGHT_H2H
+        + point_diff_diff * point_diff_weight(sport)
+        + rest_diff * WEIGHT_REST
+    )
+
+    return clamp_value(adjustment, -MAX_FEATURE_ADJUSTMENT, MAX_FEATURE_ADJUSTMENT)
 
 
 def expected_score(rating_a: float, rating_b: float) -> float:
@@ -447,7 +667,12 @@ def compute_elo_ratings(events: List[Dict[str, Any]]) -> Dict[str, float]:
 
 
 def build_prediction(
-    event: Dict[str, Any], ratings: Dict[str, float]
+    event: Dict[str, Any],
+    ratings: Dict[str, float],
+    team_stats: Dict[str, TeamStats],
+    matchup_history: Dict[Tuple[str, str], List[CompletedEvent]],
+    now: datetime,
+    sport: str,
 ) -> Optional[Dict[str, Any]]:
     home = event.get("strHomeTeam")
     away = event.get("strAwayTeam")
@@ -455,7 +680,10 @@ def build_prediction(
         return None
     home_rating = ratings.get(home, BASE_ELO)
     away_rating = ratings.get(away, BASE_ELO)
-    home_prob = expected_score(home_rating + HOME_ADVANTAGE, away_rating)
+    adjustment = compute_feature_adjustment(
+        home, away, team_stats, matchup_history, now, sport
+    )
+    home_prob = expected_score(home_rating + HOME_ADVANTAGE + adjustment, away_rating)
     away_prob = 1.0 - home_prob
     predicted = home if home_prob >= 0.5 else away
     return {
@@ -564,6 +792,7 @@ async def predict(
 
     ratings = compute_elo_ratings(past_events)
     missing_team_ids: List[str] = []
+    extra_rating_events: List[Dict[str, Any]] = []
     for event in filtered_upcoming:
         home = event.get("strHomeTeam")
         away = event.get("strAwayTeam")
@@ -577,7 +806,6 @@ async def predict(
     if missing_team_ids:
         seen_event_ids = {e.get("idEvent") for e in past_events if e.get("idEvent")}
         seen_composite: set[str] = set()
-        extra_rating_events: List[Dict[str, Any]] = []
         unique_team_ids = list(dict.fromkeys(missing_team_ids))
         for team_id in unique_team_ids[:MAX_TEAM_LOOKUPS]:
             try:
@@ -602,9 +830,38 @@ async def predict(
                 extra_rating_events.append(event)
         if extra_rating_events:
             update_elo_ratings(ratings, extra_rating_events)
+    completed_events: List[CompletedEvent] = []
+    seen_event_ids: set[str] = set()
+    seen_composite: set[str] = set()
+    for event in past_events + extra_rating_events:
+        completed = extract_completed_event(event)
+        if completed is None:
+            continue
+        event_id = event.get("idEvent")
+        if event_id:
+            if event_id in seen_event_ids:
+                continue
+            seen_event_ids.add(event_id)
+        else:
+            composite = (
+                f"{completed.date.date()}|"
+                f"{completed.home_team}|"
+                f"{completed.away_team}|"
+                f"{completed.home_score}|"
+                f"{completed.away_score}"
+            )
+            if composite in seen_composite:
+                continue
+            seen_composite.add(composite)
+        completed_events.append(completed)
+
+    team_stats = build_team_stats(completed_events)
+    matchup_history = build_matchup_history(completed_events)
     predictions: List[Dict[str, Any]] = []
     for event in sorted(filtered_upcoming, key=upcoming_sort_key):
-        prediction = build_prediction(event, ratings)
+        prediction = build_prediction(
+            event, ratings, team_stats, matchup_history, now, league_sport
+        )
         if prediction:
             predictions.append(prediction)
 
@@ -616,7 +873,7 @@ async def predict(
 
     response: Dict[str, Any] = {
         "league": league_key,
-        "model": "elo",
+        "model": "elo-plus",
         "data_source": "TheSportsDB",
         "requested": limit,
         "returned": len(predictions),

@@ -1,8 +1,9 @@
 # Sports Outcome Prediction App (Educational)
 
-This project is a lightweight API that produces simple sports outcome predictions
-for the four major US leagues (NFL, NBA, MLB, NHL). It uses public data from the
-TheSportsDB API and a basic Elo-style rating model.
+This project is a lightweight API that produces sports outcome predictions for
+the four major US leagues (NFL, NBA, MLB, NHL). It uses public data from the
+TheSportsDB API and blends Elo ratings with recent form, record, head-to-head,
+point differential, and rest days.
 
 **Note:** This is for educational and analytics purposes only. It is not intended
 for gambling or wagering decisions.
@@ -10,6 +11,7 @@ for gambling or wagering decisions.
 ## Features
 - Fetches recent and upcoming events via TheSportsDB API
 - Builds Elo ratings from recent results
+- Blends record, recent form, head-to-head, point differential, and rest days
 - Predicts win probabilities for upcoming games
 - FastAPI endpoints for easy integration
 
@@ -164,12 +166,21 @@ You can tune the prediction behavior with environment variables:
 - `SPORTSDB_LOOKAHEAD_DAYS` (default: 10) how far ahead to search for games
 - `SPORTSDB_HOME_ADVANTAGE` (default: 60) Elo points added to home team
 - `SPORTSDB_TEAM_LOOKUPS` (default: 12) max team lookups for extra ratings
+- `SPORTSDB_RECENT_GAMES` (default: 5) games used for recent form
+- `SPORTSDB_H2H_GAMES` (default: 5) games used for head-to-head form
+- `SPORTSDB_REST_CAP` (default: 14) max rest days counted
+- `SPORTSDB_MAX_ADJUSTMENT` (default: 400) clamp for feature adjustment
+- `SPORTSDB_WEIGHT_WIN_PCT` (default: 160) record weight
+- `SPORTSDB_WEIGHT_RECENT` (default: 120) recent form weight
+- `SPORTSDB_WEIGHT_H2H` (default: 80) head-to-head weight
+- `SPORTSDB_WEIGHT_REST` (default: 5) rest-day weight
+- `SPORTSDB_WEIGHT_POINT_DIFF` (default: 1.0) point diff multiplier
 
 ## Example Response
 ```json
 {
   "league": "NFL",
-  "model": "elo",
+  "model": "elo-plus",
   "predictions": [
     {
       "event_id": "123456",
@@ -186,8 +197,9 @@ You can tune the prediction behavior with environment variables:
 ```
 
 ## Notes
-- Predictions are based on a simple Elo model and recent game data.
+- Predictions are based on Elo plus recent results-derived factors.
 - If a team has no recent results, its rating falls back to 1500 (near 50/50).
+- Injuries and lineup changes are not available in the free data source.
 - Accuracy will vary; the app is a demonstration of workflow and API usage.
 
 ## Troubleshooting
