@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 
 LEAGUES: Dict[str, Dict[str, str]] = {
     "NFL": {"id": "4391", "name": "National Football League"},
@@ -20,6 +21,208 @@ DEFAULT_API_KEY = "123"
 BASE_ELO = 1500.0
 K_FACTOR = 20.0
 CACHE_TTL_SECONDS = int(os.getenv("SPORTSDB_CACHE_TTL_SECONDS", "300"))
+
+INDEX_HTML = """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sports Outcome Predictions</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        font-family: Arial, sans-serif;
+        margin: 0;
+        padding: 0;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      main {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 32px 20px 48px;
+      }
+      header {
+        margin-bottom: 24px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 28px;
+      }
+      p {
+        margin: 0 0 12px;
+        color: #cbd5f5;
+      }
+      .card {
+        background: #1e293b;
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 16px;
+        box-shadow: 0 10px 18px rgba(15, 23, 42, 0.2);
+      }
+      label {
+        display: block;
+        font-weight: 600;
+        margin-bottom: 8px;
+      }
+      select,
+      input,
+      button {
+        font-size: 16px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid #334155;
+        background: #0f172a;
+        color: inherit;
+      }
+      button {
+        background: #38bdf8;
+        color: #0f172a;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 16px;
+      }
+      .results {
+        margin-top: 24px;
+      }
+      .prediction {
+        border-left: 3px solid #38bdf8;
+        padding-left: 12px;
+      }
+      .error {
+        color: #fecaca;
+        background: #7f1d1d;
+        border-radius: 8px;
+        padding: 10px 12px;
+        margin-top: 12px;
+      }
+      .muted {
+        color: #94a3b8;
+        font-size: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Sports Outcome Predictions</h1>
+        <p>
+          Educational predictions for NFL, NBA, MLB, and NHL using a simple Elo
+          model and TheSportsDB data.
+        </p>
+        <p class="muted">
+          Not intended for gambling or wagering decisions.
+        </p>
+      </header>
+
+      <section class="card">
+        <form id="predict-form">
+          <div class="grid">
+            <div>
+              <label for="league">League</label>
+              <select id="league" name="league" required>
+                <option value="NFL">NFL</option>
+                <option value="NBA" selected>NBA</option>
+                <option value="MLB">MLB</option>
+                <option value="NHL">NHL</option>
+              </select>
+            </div>
+            <div>
+              <label for="limit">Number of games</label>
+              <input id="limit" name="limit" type="number" value="5" min="1" max="20" />
+            </div>
+            <div>
+              <label>&nbsp;</label>
+              <button type="submit" id="submit">Get predictions</button>
+            </div>
+          </div>
+        </form>
+        <div id="error" class="error" style="display: none;"></div>
+      </section>
+
+      <section class="results" id="results"></section>
+    </main>
+
+    <script>
+      const form = document.getElementById("predict-form");
+      const resultsEl = document.getElementById("results");
+      const errorEl = document.getElementById("error");
+      const submitBtn = document.getElementById("submit");
+
+      const renderPredictions = (payload) => {
+        resultsEl.innerHTML = "";
+        const predictions = payload.predictions || [];
+        if (predictions.length === 0) {
+          resultsEl.innerHTML = "<p class=\\"muted\\">No predictions found.</p>";
+          return;
+        }
+        const container = document.createElement("div");
+        container.className = "grid";
+        predictions.forEach((item) => {
+          const card = document.createElement("div");
+          card.className = "card prediction";
+          card.innerHTML = `
+            <h3>${item.event || "Matchup"}</h3>
+            <p class="muted">${item.start_time || "Start time TBD"}</p>
+            <p><strong>Home:</strong> ${item.home_team}</p>
+            <p><strong>Away:</strong> ${item.away_team}</p>
+            <p><strong>Predicted winner:</strong> ${item.predicted_winner}</p>
+            <p><strong>Home win prob:</strong> ${item.home_win_prob}</p>
+            <p><strong>Away win prob:</strong> ${item.away_win_prob}</p>
+          `;
+          container.appendChild(card);
+        });
+        resultsEl.appendChild(container);
+      };
+
+      const showError = (message) => {
+        errorEl.style.display = "block";
+        errorEl.textContent = message;
+      };
+
+      const clearError = () => {
+        errorEl.style.display = "none";
+        errorEl.textContent = "";
+      };
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        clearError();
+        submitBtn.disabled = true;
+        resultsEl.innerHTML = "<p class=\\"muted\\">Loading...</p>";
+
+        const league = document.getElementById("league").value;
+        const limit = document.getElementById("limit").value || 5;
+        const url = `/predict?league=${encodeURIComponent(league)}&limit=${encodeURIComponent(limit)}`;
+
+        try {
+          const response = await fetch(url);
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.detail || "Request failed");
+          }
+          renderPredictions(data);
+        } catch (err) {
+          resultsEl.innerHTML = "";
+          showError(err.message || "Unable to load predictions.");
+        } finally {
+          submitBtn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>
+"""
 
 
 @dataclass
@@ -189,6 +392,10 @@ async def shutdown() -> None:
 @app.get("/health")
 async def health() -> Dict[str, str]:
     return {"status": "ok"}
+
+@app.get("/", response_class=HTMLResponse)
+async def index() -> str:
+    return INDEX_HTML
 
 
 @app.get("/leagues")

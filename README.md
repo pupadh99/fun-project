@@ -66,13 +66,20 @@ http://127.0.0.1:8000/docs
 ```
 You can try requests directly from the Swagger UI.
 
-### 7) Make a prediction request
+### 7) Use the web UI
+Open:
+```
+http://127.0.0.1:8000/
+```
+Select a league, choose a number of games, and click **Get predictions**.
+
+### 8) Make a prediction request
 In a new terminal:
 ```bash
 curl "http://127.0.0.1:8000/predict?league=NFL&limit=5"
 ```
 
-### 8) Try a different league
+### 9) Try a different league
 ```bash
 curl "http://127.0.0.1:8000/predict?league=NBA&limit=3"
 ```
