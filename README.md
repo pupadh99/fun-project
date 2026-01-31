@@ -159,6 +159,12 @@ The API filters out completed games and only returns future events. If there
 aren't enough games scheduled in the next few days, it will return fewer results
 with a helpful note.
 
+### Optional configuration
+You can tune the prediction behavior with environment variables:
+- `SPORTSDB_LOOKAHEAD_DAYS` (default: 10) how far ahead to search for games
+- `SPORTSDB_HOME_ADVANTAGE` (default: 60) Elo points added to home team
+- `SPORTSDB_TEAM_LOOKUPS` (default: 12) max team lookups for extra ratings
+
 ## Example Response
 ```json
 {
@@ -180,7 +186,8 @@ with a helpful note.
 ```
 
 ## Notes
-- Predictions are based on a simple Elo model and limited recent game data.
+- Predictions are based on a simple Elo model and recent game data.
+- If a team has no recent results, its rating falls back to 1500 (near 50/50).
 - Accuracy will vary; the app is a demonstration of workflow and API usage.
 
 ## Troubleshooting

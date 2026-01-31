@@ -38,6 +38,8 @@ BASE_ELO = 1500.0
 K_FACTOR = 20.0
 CACHE_TTL_SECONDS = int(os.getenv("SPORTSDB_CACHE_TTL_SECONDS", "300"))
 LOOKAHEAD_DAYS = int(os.getenv("SPORTSDB_LOOKAHEAD_DAYS", "10"))
+HOME_ADVANTAGE = float(os.getenv("SPORTSDB_HOME_ADVANTAGE", "60"))
+MAX_TEAM_LOOKUPS = int(os.getenv("SPORTSDB_TEAM_LOOKUPS", "12"))
 
 FINISHED_STATUSES = {
     "FT",
@@ -320,6 +322,10 @@ class SportsDBClient:
         data = await self.fetch_json("eventsnextleague.php", {"id": league_id})
         return data.get("events") or []
 
+    async def get_team_last_events(self, team_id: str) -> List[Dict[str, Any]]:
+        data = await self.fetch_json("eventslast.php", {"id": team_id})
+        return data.get("results") or data.get("events") or []
+
     async def get_events_by_day(
         self, date_str: str, league: str, sport: str
     ) -> List[Dict[str, Any]]:
@@ -405,9 +411,9 @@ def expected_score(rating_a: float, rating_b: float) -> float:
     return 1.0 / (1.0 + 10 ** ((rating_b - rating_a) / 400.0))
 
 
-def compute_elo_ratings(events: List[Dict[str, Any]]) -> Dict[str, float]:
-    ratings: Dict[str, float] = {}
-
+def update_elo_ratings(
+    ratings: Dict[str, float], events: List[Dict[str, Any]]
+) -> None:
     def sort_key(event: Dict[str, Any]) -> datetime:
         return parse_event_datetime(event) or datetime.min
 
@@ -432,6 +438,11 @@ def compute_elo_ratings(events: List[Dict[str, Any]]) -> Dict[str, float]:
         expected_away = 1.0 - expected_home
         ratings[home] += K_FACTOR * (outcome - expected_home)
         ratings[away] += K_FACTOR * ((1.0 - outcome) - expected_away)
+
+
+def compute_elo_ratings(events: List[Dict[str, Any]]) -> Dict[str, float]:
+    ratings: Dict[str, float] = {}
+    update_elo_ratings(ratings, events)
     return ratings
 
 
@@ -444,7 +455,7 @@ def build_prediction(
         return None
     home_rating = ratings.get(home, BASE_ELO)
     away_rating = ratings.get(away, BASE_ELO)
-    home_prob = expected_score(home_rating, away_rating)
+    home_prob = expected_score(home_rating + HOME_ADVANTAGE, away_rating)
     away_prob = 1.0 - home_prob
     predicted = home if home_prob >= 0.5 else away
     return {
@@ -552,6 +563,45 @@ async def predict(
         )
 
     ratings = compute_elo_ratings(past_events)
+    missing_team_ids: List[str] = []
+    for event in filtered_upcoming:
+        home = event.get("strHomeTeam")
+        away = event.get("strAwayTeam")
+        home_id = event.get("idHomeTeam")
+        away_id = event.get("idAwayTeam")
+        if home_id and home and home not in ratings:
+            missing_team_ids.append(home_id)
+        if away_id and away and away not in ratings:
+            missing_team_ids.append(away_id)
+
+    if missing_team_ids:
+        seen_event_ids = {e.get("idEvent") for e in past_events if e.get("idEvent")}
+        seen_composite: set[str] = set()
+        extra_rating_events: List[Dict[str, Any]] = []
+        unique_team_ids = list(dict.fromkeys(missing_team_ids))
+        for team_id in unique_team_ids[:MAX_TEAM_LOOKUPS]:
+            try:
+                team_events = await _client.get_team_last_events(team_id)
+            except httpx.HTTPError:
+                continue
+            for event in team_events:
+                event_id = event.get("idEvent")
+                if event_id:
+                    if event_id in seen_event_ids:
+                        continue
+                    seen_event_ids.add(event_id)
+                else:
+                    composite = (
+                        f"{event.get('dateEvent')}|"
+                        f"{event.get('strHomeTeam')}|"
+                        f"{event.get('strAwayTeam')}"
+                    )
+                    if composite in seen_composite:
+                        continue
+                    seen_composite.add(composite)
+                extra_rating_events.append(event)
+        if extra_rating_events:
+            update_elo_ratings(ratings, extra_rating_events)
     predictions: List[Dict[str, Any]] = []
     for event in sorted(filtered_upcoming, key=upcoming_sort_key):
         prediction = build_prediction(event, ratings)
