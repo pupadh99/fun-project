@@ -155,6 +155,10 @@ Returns predictions for upcoming games in the selected league.
 - `league` (required): `NFL`, `NBA`, `MLB`, or `NHL`
 - `limit` (optional): number of upcoming events to return (1-20)
 
+The API filters out completed games and only returns future events. If there
+aren't enough games scheduled in the next few days, it will return fewer results
+with a helpful note.
+
 ## Example Response
 ```json
 {

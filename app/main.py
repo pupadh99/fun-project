@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -11,16 +11,54 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
 LEAGUES: Dict[str, Dict[str, str]] = {
-    "NFL": {"id": "4391", "name": "National Football League"},
-    "NBA": {"id": "4387", "name": "National Basketball Association"},
-    "MLB": {"id": "4424", "name": "Major League Baseball"},
-    "NHL": {"id": "4380", "name": "National Hockey League"},
+    "NFL": {
+        "id": "4391",
+        "name": "National Football League",
+        "sport": "American Football",
+    },
+    "NBA": {
+        "id": "4387",
+        "name": "National Basketball Association",
+        "sport": "Basketball",
+    },
+    "MLB": {
+        "id": "4424",
+        "name": "Major League Baseball",
+        "sport": "Baseball",
+    },
+    "NHL": {
+        "id": "4380",
+        "name": "National Hockey League",
+        "sport": "Ice Hockey",
+    },
 }
 
 DEFAULT_API_KEY = "123"
 BASE_ELO = 1500.0
 K_FACTOR = 20.0
 CACHE_TTL_SECONDS = int(os.getenv("SPORTSDB_CACHE_TTL_SECONDS", "300"))
+LOOKAHEAD_DAYS = int(os.getenv("SPORTSDB_LOOKAHEAD_DAYS", "10"))
+
+FINISHED_STATUSES = {
+    "FT",
+    "FULL TIME",
+    "FINAL",
+    "AET",
+    "PEN",
+    "CANCELLED",
+    "CANCELED",
+    "ABANDONED",
+    "SUSPENDED",
+    "AWARDED",
+    "POSTPONED",
+}
+UPCOMING_STATUSES = {
+    "NS",
+    "NOT STARTED",
+    "SCHEDULED",
+    "TBD",
+    "TIME TBD",
+}
 
 INDEX_HTML = """<!doctype html>
 <html lang="en">
@@ -166,6 +204,17 @@ INDEX_HTML = """<!doctype html>
           resultsEl.innerHTML = "<p class=\\"muted\\">No predictions found.</p>";
           return;
         }
+        const summary = document.createElement("p");
+        summary.className = "muted";
+        const requested = payload.requested || predictions.length;
+        summary.textContent = `Showing ${predictions.length} of ${requested} requested games.`;
+        resultsEl.appendChild(summary);
+        if (payload.note) {
+          const note = document.createElement("p");
+          note.className = "muted";
+          note.textContent = payload.note;
+          resultsEl.appendChild(note);
+        }
         const container = document.createElement("div");
         container.className = "grid";
         predictions.forEach((item) => {
@@ -271,6 +320,13 @@ class SportsDBClient:
         data = await self.fetch_json("eventsnextleague.php", {"id": league_id})
         return data.get("events") or []
 
+    async def get_events_by_day(
+        self, date_str: str, league: str, sport: str
+    ) -> List[Dict[str, Any]]:
+        params: Dict[str, Any] = {"d": date_str, "l": league, "s": sport}
+        data = await self.fetch_json("eventsday.php", params)
+        return data.get("events") or []
+
     async def close(self) -> None:
         await self._client.aclose()
 
@@ -307,6 +363,42 @@ def format_event_datetime(event: Dict[str, Any]) -> Optional[str]:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.isoformat()
+
+
+def normalize_status(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().upper()
+
+
+def is_upcoming_event(event: Dict[str, Any], now: datetime) -> bool:
+    status = normalize_status(event.get("strStatus"))
+    home_score = parse_score(event.get("intHomeScore"))
+    away_score = parse_score(event.get("intAwayScore"))
+
+    if status in FINISHED_STATUSES:
+        return False
+
+    if (home_score is not None or away_score is not None) and status not in UPCOMING_STATUSES:
+        return False
+
+    event_dt = parse_event_datetime(event)
+    if event_dt:
+        if event_dt.tzinfo is None:
+            event_dt = event_dt.replace(tzinfo=timezone.utc)
+        if event_dt < now:
+            return False
+
+    return True
+
+
+def upcoming_sort_key(event: Dict[str, Any]) -> datetime:
+    dt = parse_event_datetime(event)
+    if dt is None:
+        return datetime.max.replace(tzinfo=timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def expected_score(rating_a: float, rating_b: float) -> float:
@@ -418,6 +510,7 @@ async def predict(
         raise HTTPException(status_code=500, detail="Data client unavailable")
 
     league_id = LEAGUES[league_key]["id"]
+    league_sport = LEAGUES[league_key]["sport"]
     try:
         past_events = await _client.get_past_events(league_id)
         upcoming_events = await _client.get_next_events(league_id)
@@ -426,21 +519,63 @@ async def predict(
             status_code=502, detail="Data provider request failed"
         ) from exc
 
-    if not upcoming_events:
+    now = datetime.now(timezone.utc)
+    filtered_upcoming = [e for e in upcoming_events if is_upcoming_event(e, now)]
+
+    if len(filtered_upcoming) < limit:
+        existing_ids = {e.get("idEvent") for e in filtered_upcoming if e.get("idEvent")}
+        extra_events: List[Dict[str, Any]] = []
+        for offset in range(LOOKAHEAD_DAYS):
+            date_str = (now + timedelta(days=offset)).date().isoformat()
+            try:
+                day_events = await _client.get_events_by_day(
+                    date_str, league_key, league_sport
+                )
+            except httpx.HTTPError:
+                continue
+            for event in day_events:
+                event_id = event.get("idEvent")
+                if event_id and event_id in existing_ids:
+                    continue
+                if not is_upcoming_event(event, now):
+                    continue
+                extra_events.append(event)
+                if event_id:
+                    existing_ids.add(event_id)
+            if len(filtered_upcoming) + len(extra_events) >= limit:
+                break
+        filtered_upcoming.extend(extra_events)
+
+    if not filtered_upcoming:
         raise HTTPException(
             status_code=404, detail="No upcoming events found for this league"
         )
 
     ratings = compute_elo_ratings(past_events)
     predictions: List[Dict[str, Any]] = []
-    for event in upcoming_events:
+    for event in sorted(filtered_upcoming, key=upcoming_sort_key):
         prediction = build_prediction(event, ratings)
         if prediction:
             predictions.append(prediction)
 
-    return {
+    predictions = predictions[:limit]
+    if not predictions:
+        raise HTTPException(
+            status_code=404, detail="No upcoming events found for this league"
+        )
+
+    response: Dict[str, Any] = {
         "league": league_key,
         "model": "elo",
         "data_source": "TheSportsDB",
-        "predictions": predictions[:limit],
+        "requested": limit,
+        "returned": len(predictions),
+        "predictions": predictions,
     }
+    if len(predictions) < limit:
+        response["note"] = (
+            "Only a limited number of upcoming games were found in the next "
+            f"{LOOKAHEAD_DAYS} days."
+        )
+
+    return response
