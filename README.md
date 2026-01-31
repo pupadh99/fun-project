@@ -77,6 +77,62 @@ curl "http://127.0.0.1:8000/predict?league=NFL&limit=5"
 curl "http://127.0.0.1:8000/predict?league=NBA&limit=3"
 ```
 
+## Using Anaconda Navigator
+
+If you prefer Anaconda Navigator, follow these steps to run the app:
+
+### 1) Create a new conda environment
+1. Open **Anaconda Navigator**.
+2. Click **Environments** (left sidebar).
+3. Click **Create**.
+4. Name it `sports-predict` and choose **Python 3.10** (or newer).
+5. Click **Create**.
+
+### 2) Open a terminal in the new environment
+1. Select the `sports-predict` environment in Navigator.
+2. Click the **▶** (play) button.
+3. Choose **Open Terminal** (macOS/Linux) or **Open Command Prompt / PowerShell** (Windows).
+
+### 3) Install dependencies
+In the terminal, move to the repo and install requirements:
+```bash
+cd /path/to/your/repo
+pip install -r requirements.txt
+```
+
+### 4) Set your API key (optional but recommended)
+You can set the variable in the terminal session:
+
+- macOS/Linux:
+  ```bash
+  export SPORTSDB_API_KEY="YOUR_KEY_HERE"
+  ```
+- Windows PowerShell:
+  ```powershell
+  $env:SPORTSDB_API_KEY="YOUR_KEY_HERE"
+  ```
+- Windows Command Prompt:
+  ```cmd
+  set SPORTSDB_API_KEY=YOUR_KEY_HERE
+  ```
+
+If you want it to persist for this environment:
+```bash
+conda env config vars set SPORTSDB_API_KEY=YOUR_KEY_HERE
+```
+Then close and reopen the terminal so the variable loads.
+
+### 5) Run the API server
+```bash
+uvicorn app.main:app --reload
+```
+
+### 6) Open the interactive docs
+Open your browser to:
+```
+http://127.0.0.1:8000/docs
+```
+
 ## Endpoints
 
 ### `GET /health`
