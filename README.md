@@ -17,23 +17,65 @@ for gambling or wagering decisions.
 - Python 3.10+
 - TheSportsDB API key (free tier supported)
 
-## Setup
+## Quick Start (New User Guide)
 
-1. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+Follow these steps from a clean machine to get the API running and make your
+first prediction request.
 
-2. Set your API key (optional for testing):
+### 1) Install Python
+Make sure Python 3.10+ is installed:
+```bash
+python3 --version
+```
+
+### 2) (Recommended) Create a virtual environment
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### 3) Install dependencies
+From the repository root:
+```bash
+pip install -r requirements.txt
+```
+
+### 4) Get an API key (optional but recommended)
+This app uses TheSportsDB. The free tier works for testing.
+1. Create an account at https://www.thesportsdb.com/
+2. Copy your API key.
+3. Set it in your shell:
    ```bash
    export SPORTSDB_API_KEY="YOUR_KEY_HERE"
    ```
-   If you do not set this, the app will use the public test key `1`.
+If you do not set this, the app will use the public test key `1` (rate limited).
 
-3. Run the API:
-   ```bash
-   uvicorn app.main:app --reload
-   ```
+### 5) Run the API server
+```bash
+uvicorn app.main:app --reload
+```
+You should see a message like:
+```
+Uvicorn running on http://127.0.0.1:8000
+```
+
+### 6) Open the interactive docs
+Visit:
+```
+http://127.0.0.1:8000/docs
+```
+You can try requests directly from the Swagger UI.
+
+### 7) Make a prediction request
+In a new terminal:
+```bash
+curl "http://127.0.0.1:8000/predict?league=NFL&limit=5"
+```
+
+### 8) Try a different league
+```bash
+curl "http://127.0.0.1:8000/predict?league=NBA&limit=3"
+```
 
 ## Endpoints
 
@@ -73,3 +115,8 @@ Returns predictions for upcoming games in the selected league.
 ## Notes
 - Predictions are based on a simple Elo model and limited recent game data.
 - Accuracy will vary; the app is a demonstration of workflow and API usage.
+
+## Troubleshooting
+- **No upcoming events**: Some leagues may be out of season; try a different league.
+- **Rate limited**: Use a personal API key instead of the public test key.
+- **Cannot import module**: Ensure your virtual environment is activated.
